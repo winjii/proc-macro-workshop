@@ -11,19 +11,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_name = syn::Ident::new(&builder_name, struct_name.span());
     let (field_names, field_types) = match input.data {
         syn::Data::Struct(ref ds) => {
-            let fields = ds.fields.iter().filter_map(|field| {
-                field.ident.as_ref().map(|ident| { (ident, &field.ty) })
-            });
+            let fields = ds
+                .fields
+                .iter()
+                .filter_map(|field| field.ident.as_ref().map(|ident| (ident, &field.ty)));
             (
                 fields.clone().map(|(x, _)| x).collect::<Vec<&syn::Ident>>(),
-                fields.map(|(_, x)| x).collect::<Vec<&syn::Type>>()
+                fields.map(|(_, x)| x).collect::<Vec<&syn::Type>>(),
             )
         }
         _ => {
             panic!("{} has data which is not struct.", struct_name);
-        },
+        }
     };
-    
+
     let output = quote! {
         impl #struct_name {
             pub fn builder() -> #builder_name {
@@ -34,6 +35,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
             #(
                 #field_names: Option<#field_types>
             ),*
+        }
+        impl #builder_name {
+            #(
+                fn #field_names(&mut self, #field_names: #field_types) -> &mut Self {
+                    self.#field_names = Some(#field_names);
+                    self
+                }
+            )*
         }
     };
     let output = output.into();
