@@ -24,6 +24,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             panic!("{} has data which is not struct.", struct_name);
         }
     };
+    let field_names_str: Vec<String> = field_names.iter().map(|x| x.to_string()).collect();
 
     let output = quote! {
         impl #struct_name {
@@ -43,10 +44,27 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     self
                 }
             )*
+            pub fn build(&mut self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+                #(
+                    let #field_names = match self.#field_names {
+                        Some(ref x) => x.clone(),
+                        None => return Err(concat!("field", #field_names_str, "is None.").into()),
+                    };
+                )*
+                Ok(#struct_name { #(#field_names),* })
+            }
+            pub fn build_once(self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+                #(
+                    let #field_names = match self.#field_names {
+                        Some(x) => x,
+                        None => return Err(concat!("field", #field_names_str, "is None.").into()),
+                    };
+                )*
+                Ok(#struct_name { #(#field_names),* })
+            }
         }
     };
     let output = output.into();
     eprintln!("OUTPUT: {:#}", output);
-    // eprintln!("attrs: {:#?}", attrs[0]);
     output
 }

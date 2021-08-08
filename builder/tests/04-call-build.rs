@@ -30,4 +30,6 @@ fn main() {
 
     let command = builder.build().unwrap();
     assert_eq!(command.executable, "cargo");
+    let command = builder.build_once().unwrap();
+    assert_eq!(command.executable, "cargo");
 }
