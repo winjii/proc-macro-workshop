@@ -3,27 +3,149 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse_macro_input;
 
-struct FieldData<'a> {
-    pub ident: &'a syn::Ident,
-    pub ty: &'a syn::Type,
-    pub is_optional: bool,
+#[derive(Debug)]
+enum FieldKind {
+    Plain,
+    Option,
+    Vec { each: syn::Ident },
 }
-
-impl<'a> FieldData<'a> {
-    pub fn original_type(&self) -> TokenStream2 {
-        let ty = self.ty;
-        if self.is_optional {
-            quote!(Option<#ty>)
-        } else {
-            quote!(ty)
+impl FieldKind {
+    fn is_optional(&self) -> bool {
+        match self {
+            FieldKind::Option => true,
+            FieldKind::Vec { .. } => true,
+            FieldKind::Plain => false,
         }
     }
 }
 
-#[proc_macro_derive(Builder)]
+#[derive(Debug)]
+struct FieldData<'a> {
+    pub ident: &'a syn::Ident,
+    pub ty: &'a syn::Type,
+    pub kind: FieldKind,
+}
+
+impl<'a> FieldData<'a> {
+    fn type_in_builder(&self) -> TokenStream2 {
+        let ty = self.ty;
+        match &self.kind {
+            FieldKind::Plain => quote!(Option<#ty>),
+            FieldKind::Option => quote!(Option<#ty>),
+            FieldKind::Vec { .. } => quote!(Vec<#ty>),
+        }
+    }
+    fn type_set(&self) -> TokenStream2 {
+        let ty = self.ty;
+        match &self.kind {
+            FieldKind::Plain => quote!(#ty),
+            FieldKind::Option => quote!(#ty),
+            FieldKind::Vec { .. } => quote!(Vec<#ty>),
+        }
+    }
+    fn default_value(&self) -> TokenStream2 {
+        let ty = self.ty;
+        match &self.kind {
+            FieldKind::Plain => quote!(None),
+            FieldKind::Option => quote!(None),
+            FieldKind::Vec { .. } => quote!(Vec::<#ty>::new()),
+        }
+    }
+    fn convert_setter_value<T: quote::ToTokens>(&self, value: &T) -> TokenStream2 {
+        match &self.kind {
+            FieldKind::Plain => quote!(Some(#value)),
+            FieldKind::Option => quote!(Some(#value)),
+            FieldKind::Vec { .. } => quote!(#value),
+        }
+    }
+    fn from(f: &'a syn::Field) -> Option<FieldData> {
+        let ident = match f.ident {
+            Some(ref x) => x,
+            None => return None,
+        };
+
+        let meta = f
+            .attrs
+            .iter()
+            .filter_map(|a| a.parse_meta().ok())
+            .collect::<Vec<syn::Meta>>();
+        let get_each = |m: &syn::Meta| {
+            match m {
+                syn::Meta::List(ref p) => Some(p),
+                _ => None,
+            }
+            .filter(|m| {
+                m.path
+                    .segments
+                    .first()
+                    .filter(|seg| seg.ident.to_string() == "builder")
+                    .is_some()
+            })
+            .and_then(|m| m.nested.first())
+            .and_then(|m| match m {
+                syn::NestedMeta::Meta(ref m) => Some(m),
+                _ => None,
+            })
+            .and_then(|ref m| match m {
+                syn::Meta::NameValue(ref x) => Some(x),
+                _ => None,
+            })
+            .filter(|nv| {
+                nv.path
+                    .segments
+                    .first()
+                    .filter(|s| s.ident.to_string() == "each")
+                    .is_some()
+            })
+            .and_then(|nv: &syn::MetaNameValue| match nv.lit {
+                syn::Lit::Str(ref s) => Some(syn::Ident::new(&s.value(), s.span())),
+                _ => None,
+            })
+        };
+        let each: Option<syn::Ident> = meta.iter().filter_map(|m| get_each(m)).next();
+
+        let kind = match f.ty {
+            syn::Type::Path(ref x) => x.path.segments.first(),
+            _ => None,
+        }
+        .and_then(|s| match &s.ident.to_string()[..] {
+            "Option" => Some(FieldKind::Option),
+            "Vec" => each.map(|each| FieldKind::Vec { each }),
+            _ => None,
+        })
+        .unwrap_or(FieldKind::Plain);
+
+        let get_generic_arg = || {
+            match f.ty {
+                syn::Type::Path(ref x) => x.path.segments.first(),
+                _ => None,
+            }
+            .and_then(|ps| match ps.arguments {
+                syn::PathArguments::AngleBracketed(ref x) => Some(x),
+                _ => None,
+            })
+            .and_then(|x| {
+                x.args.first().and_then(|x| match x {
+                    syn::GenericArgument::Type(ref x) => Some(x),
+                    _ => None,
+                })
+            })
+        };
+
+        let ty = match kind {
+            FieldKind::Plain => Some(&f.ty),
+            FieldKind::Option => get_generic_arg(),
+            FieldKind::Vec { .. } => get_generic_arg(),
+        };
+
+        return ty.map(|ty| FieldData { ident, ty, kind });
+    }
+}
+
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
-    eprintln!("INPUT: {:#?}", input);
+    // eprintln!("INPUT: {:#?}", input);
     let struct_name = input.ident;
     let builder_name = format!("{}Builder", struct_name);
     let builder_name = syn::Ident::new(&builder_name, struct_name.span());
@@ -33,32 +155,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
             panic!("{} has data which is not struct.", struct_name);
         }
     };
-    // let fields = data.fields.iter().map(|f| match option_field_type(f) {
-    //     Some(t) => {
-    //         let mut f = f.clone();
-    //         f.ty = t.clone();
-    //         (f, true)
-    //     }
-    //     None => (f.clone(), false),
-    // });
-    let fields = data.fields.iter().filter_map(|f| {
-        f.ident.as_ref().map(|ref ident| {
-            let ty = option_field_type(f);
-            let is_optional = ty.is_some();
-            let ty = ty.unwrap_or(&f.ty);
-            FieldData {
-                ident,
-                ty,
-                is_optional,
-            }
-        })
-    });
+    let fields: Vec<FieldData> = data
+        .fields
+        .iter()
+        .filter_map(|f| FieldData::from(f))
+        .collect();
+
+    // eprintln!("{:#?}", fields);
 
     let builder_function = {
-        let builder_inits = fields.clone().map(|f| {
+        let builder_inits = fields.iter().map(|f| {
             let ident = f.ident;
+            let default = f.default_value();
             quote!(
-                #ident: None,
+                #ident: #default,
             )
         });
         quote! {
@@ -70,54 +180,79 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    let fields_declaration = fields.clone().map(|f| {
+    let fields_declaration = fields.iter().map(|f| {
         let ident = f.ident;
-        let ty = f.ty;
+        let ty = f.type_in_builder();
         quote!(
-            #ident: Option<#ty>,
+            #ident: #ty,
         )
     });
     let fields_declaration = quote!(#(#fields_declaration)*);
 
-    let setters = fields.clone().map(|f| {
-        let ident = f.ident;
-        let ty = f.ty;
-        quote!(
-            fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                self.#ident = Some(#ident);
-                self
-            }
-        )
+    let setters = fields
+        .iter()
+        .filter(|f| match &f.kind {
+            FieldKind::Plain => true,
+            FieldKind::Option => true,
+            FieldKind::Vec { each } => return f.ident.to_string() != each.to_string(),
+        })
+        .map(|f| {
+            let ident = f.ident;
+            let ty = f.type_set();
+            let value = f.convert_setter_value(ident);
+            quote!(
+                fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                    self.#ident = #value;
+                    self
+                }
+            )
+        });
+    let vec_item_settters = fields.iter().filter_map(|f| match &f.kind {
+        FieldKind::Vec { each } => {
+            let ident = f.ident;
+            let ty = f.ty;
+            Some(quote!(
+                fn #each(&mut self, item: #ty) -> &mut Self {
+                    self.#ident.push(item);
+                    self
+                }
+            ))
+        }
+        _ => None,
     });
-    let setters = quote!(#(#setters)*);
+    let setters = quote!(#(#setters)* #(#vec_item_settters)*);
 
     let build_function = {
-        let lets_required = |chain| {
-            fields.clone().filter(|f| !f.is_optional).map(move |f| {
+        let lets_required =
+            |ref_op, chain| {
+                fields.iter().filter(|f| !f.kind.is_optional()).map(move |f| {
                 let ident = f.ident;
                 let ident_str = ident.to_string();
                 quote!(
-                    let #ident = match self.#ident {
-                        Some(ref x) => x #chain,
+                    let #ident = match #ref_op self.#ident {
+                        Some(x) => x #chain,
                         None => {
                             return Err(concat!("field ", #ident_str, " is not set.", ).into())
                         }
                     };
                 )
             })
-        };
+            };
         let lets_optional = |chain| {
-            fields.clone().filter(|f| f.is_optional).map(move |f| {
-                let ident = f.ident;
-                quote!(let #ident = self.#ident #chain;)
-            })
+            fields
+                .iter()
+                .filter(|f| f.kind.is_optional())
+                .map(move |f| {
+                    let ident = f.ident;
+                    quote!(let #ident = self.#ident #chain;)
+                })
         };
-        let lets_required_cloned = lets_required(quote!(.clone()));
+        let lets_required_cloned = lets_required(quote!(&), quote!(.clone()));
         let lets_optional_cloned = lets_optional(quote!(.clone()));
-        let lets_required_moved = lets_required(quote!(.to_owned()));
-        let lets_optional_moved = lets_optional(quote!(.to_owned()));
+        let lets_required_moved = lets_required(quote!(), quote!());
+        let lets_optional_moved = lets_optional(quote!());
         let sets = fields
-            .clone()
+            .iter()
             .map(|f| {
                 let ident = f.ident;
                 quote!(#ident,)
@@ -152,20 +287,4 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let output = output.into();
     eprintln!("OUTPUT: {:#}", output);
     output
-}
-
-fn option_field_type(f: &syn::Field) -> Option<&syn::Type> {
-    if let syn::Type::Path(ref x) = f.ty {
-        if x.path.segments.len() > 0 && x.path.segments[0].ident == "Option" {
-            let ref x = x.path.segments[0].arguments;
-            if let syn::PathArguments::AngleBracketed(ref x) = x {
-                if x.args.len() > 0 {
-                    if let syn::GenericArgument::Type(ref x) = x.args[0] {
-                        return Some(x);
-                    }
-                }
-            }
-        }
-    }
-    return None;
 }
