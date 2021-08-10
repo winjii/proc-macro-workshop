@@ -1,7 +1,8 @@
+use insideout::InsideOut;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::parse_macro_input;
+use syn::{parse_macro_input, spanned::Spanned};
 
 #[derive(Debug)]
 enum FieldKind {
@@ -58,18 +59,14 @@ impl<'a> FieldData<'a> {
             FieldKind::Vec { .. } => quote!(#value),
         }
     }
-    fn from(f: &'a syn::Field) -> Option<FieldData> {
-        let ident = match f.ident {
-            Some(ref x) => x,
-            None => return None,
-        };
+    fn from(f: &'a syn::Field) -> Result<FieldData, syn::Error> {
+        let ident = f
+            .ident
+            .as_ref()
+            .ok_or(syn::Error::new(f.ident.span(), "invalid identifier"))?;
 
-        let meta = f
-            .attrs
-            .iter()
-            .filter_map(|a| a.parse_meta().ok())
-            .collect::<Vec<syn::Meta>>();
-        let get_each = |m: &syn::Meta| {
+        let meta = f.attrs.iter().map(|a| a.parse_meta());
+        let get_each = |m: &syn::Meta| -> Result<syn::Ident, syn::Error> {
             match m {
                 syn::Meta::List(ref p) => Some(p),
                 _ => None,
@@ -101,8 +98,15 @@ impl<'a> FieldData<'a> {
                 syn::Lit::Str(ref s) => Some(syn::Ident::new(&s.value(), s.span())),
                 _ => None,
             })
+            .ok_or(syn::Error::new_spanned(
+                m,
+                "expected `builder(each = \"...\")`",
+            ))
         };
-        let each: Option<syn::Ident> = meta.iter().filter_map(|m| get_each(m)).next();
+        let each: Option<syn::Ident> = meta
+            .map(|m| m.and_then(|m| get_each(&m)))
+            .next()
+            .inside_out()?;
 
         let kind = match f.ty {
             syn::Type::Path(ref x) => x.path.segments.first(),
@@ -133,12 +137,22 @@ impl<'a> FieldData<'a> {
         };
 
         let ty = match kind {
-            FieldKind::Plain => Some(&f.ty),
-            FieldKind::Option => get_generic_arg(),
-            FieldKind::Vec { .. } => get_generic_arg(),
-        };
+            FieldKind::Plain => Ok(&f.ty),
+            FieldKind::Option => get_generic_arg().ok_or(syn::Error::new(
+                f.ty.span(),
+                "cannot parse generic arguments of Option<>",
+            )),
+            FieldKind::Vec { .. } => get_generic_arg().ok_or(syn::Error::new(
+                f.ty.span(),
+                "cannot parse generic arguments of Vec<>",
+            )),
+        }?;
 
-        return ty.map(|ty| FieldData { ident, ty, kind });
+        Ok(FieldData {
+            ident: &ident,
+            ty,
+            kind,
+        })
     }
 }
 
@@ -155,11 +169,24 @@ pub fn derive(input: TokenStream) -> TokenStream {
             panic!("{} has data which is not struct.", struct_name);
         }
     };
-    let fields: Vec<FieldData> = data
-        .fields
-        .iter()
-        .filter_map(|f| FieldData::from(f))
-        .collect();
+    let fields = {
+        let mut fields: Vec<FieldData> = Vec::new();
+        data.fields
+            .iter()
+            .map(|f| FieldData::from(f))
+            .try_for_each(|field| {
+                field.map(|f| {
+                    fields.push(f);
+                })
+            })
+            .map(|_| fields)
+    };
+    let fields = match fields {
+        Ok(fields) => fields,
+        Err(e) => {
+            return e.to_compile_error().into();
+        }
+    };
 
     // eprintln!("{:#?}", fields);
 
