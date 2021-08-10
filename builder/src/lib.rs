@@ -4,6 +4,15 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, spanned::Spanned};
 
+#[allow(dead_code)]
+type IDependsOnPathOfOption<T> = std::option::Option<T>;
+#[allow(dead_code)]
+type IDependsOnPathOfVec<T> = std::vec::Vec<T>;
+#[allow(dead_code)]
+type IDependsOnPathOfResult<T, E> = std::result::Result<T, E>;
+#[allow(dead_code)]
+type IDependsOnPathOfBox<T> = std::boxed::Box<T>;
+
 #[derive(Debug)]
 enum FieldKind {
     Plain,
@@ -31,9 +40,9 @@ impl<'a> FieldData<'a> {
     fn type_in_builder(&self) -> TokenStream2 {
         let ty = self.ty;
         match &self.kind {
-            FieldKind::Plain => quote!(Option<#ty>),
-            FieldKind::Option => quote!(Option<#ty>),
-            FieldKind::Vec { .. } => quote!(Vec<#ty>),
+            FieldKind::Plain => quote!(std::option::Option<#ty>),
+            FieldKind::Option => quote!(std::option::Option<#ty>),
+            FieldKind::Vec { .. } => quote!(std::vec::Vec<#ty>),
         }
     }
     fn type_set(&self) -> TokenStream2 {
@@ -41,21 +50,21 @@ impl<'a> FieldData<'a> {
         match &self.kind {
             FieldKind::Plain => quote!(#ty),
             FieldKind::Option => quote!(#ty),
-            FieldKind::Vec { .. } => quote!(Vec<#ty>),
+            FieldKind::Vec { .. } => quote!(std::vec::Vec<#ty>),
         }
     }
     fn default_value(&self) -> TokenStream2 {
         let ty = self.ty;
         match &self.kind {
-            FieldKind::Plain => quote!(None),
-            FieldKind::Option => quote!(None),
-            FieldKind::Vec { .. } => quote!(Vec::<#ty>::new()),
+            FieldKind::Plain => quote!(std::option::Option::None),
+            FieldKind::Option => quote!(std::option::Option::None),
+            FieldKind::Vec { .. } => quote!(std::vec::Vec::<#ty>::new()),
         }
     }
     fn convert_setter_value<T: quote::ToTokens>(&self, value: &T) -> TokenStream2 {
         match &self.kind {
-            FieldKind::Plain => quote!(Some(#value)),
-            FieldKind::Option => quote!(Some(#value)),
+            FieldKind::Plain => quote!(std::option::Option::Some(#value)),
+            FieldKind::Option => quote!(std::option::Option::Some(#value)),
             FieldKind::Vec { .. } => quote!(#value),
         }
     }
@@ -250,21 +259,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let setters = quote!(#(#setters)* #(#vec_item_settters)*);
 
     let build_function = {
-        let lets_required =
-            |ref_op, chain| {
-                fields.iter().filter(|f| !f.kind.is_optional()).map(move |f| {
+        let lets_required = |ref_op, chain| {
+            fields.iter().filter(|f| !f.kind.is_optional()).map(move |f| {
                 let ident = f.ident;
                 let ident_str = ident.to_string();
                 quote!(
                     let #ident = match #ref_op self.#ident {
-                        Some(x) => x #chain,
-                        None => {
-                            return Err(concat!("field ", #ident_str, " is not set.", ).into())
+                        std::option::Option::Some(x) => x #chain,
+                        std::option::Option::None => {
+                            return std::result::Result::Err(concat!("field ", #ident_str, " is not set.", ).into())
                         }
                     };
                 )
             })
-            };
+        };
         let lets_optional = |chain| {
             fields
                 .iter()
@@ -286,15 +294,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
             })
             .collect::<Vec<TokenStream2>>();
         quote!(
-            pub fn build(&mut self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> std::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
                 #(#lets_required_cloned)*
                 #(#lets_optional_cloned)*
-                Ok( #struct_name { #(#sets)* } )
+                std::result::Result::Ok( #struct_name { #(#sets)* } )
             }
-            pub fn build_once(self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+            pub fn build_once(self) -> std::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
                 #(#lets_required_moved)*
                 #(#lets_optional_moved)*
-                Ok( #struct_name { #(#sets)* } )
+                std::result::Result::Ok( #struct_name { #(#sets)* } )
             }
         )
     };
